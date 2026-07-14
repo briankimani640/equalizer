@@ -1,8 +1,9 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::HeapRb;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tungstenite::accept;
 
 const FREQUENCIES: [f32; 10] = [22.0, 44.0, 240.0, 397.0, 735.0, 1360.0, 2520.0, 4670.0, 9100.0, 16000.0];
@@ -61,7 +62,12 @@ struct DspState {
     eq_filters: [Biquad; 10],
     clarity_boost: Biquad,
     clarity_mud_cut: Biquad,
+    bass_sub_boost: Biquad,
+    surround_width: f32,
+    ambience_level: f32,
+    dynamic_boost_ratio: f32,
     volume_boost_linear: f32,
+    current_energy: [f32; 10],
 }
 
 #[derive(Deserialize)]
@@ -74,10 +80,29 @@ struct ControlMessage {
     boost: Option<f32>,
     #[serde(default)]
     clarity: Option<f32>,
+    #[serde(default)]
+    ambience: Option<f32>,
+    #[serde(default)]
+    surround: Option<f32>,
+    #[serde(default)]
+    dynamic: Option<f32>,
+    #[serde(default)]
+    bass: Option<f32>,
+    #[serde(default)]
+    set_device: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TelemetryMessage {
+    msg_type: String,
+    active_device: String,
+    available_devices: Vec<String>,
+    levels: Vec<f32>,
+    ascii_beat: String,
 }
 
 fn main() {
-    println!("=== RUST SYSTEM-WIDE DSP ENGINE (BULLETPROOF V3) ===");
+    println!("=== RUST SYSTEM-WIDE DSP ENGINE (PRO STUDIO V5.2) ===");
 
     let host = cpal::default_host();
     
@@ -85,29 +110,29 @@ fn main() {
         d.name().unwrap_or_default().to_lowercase().contains("cable")
     }).expect("VB-Audio Virtual Cable not found!");
     
+    let mut available_device_names: Vec<String> = host.output_devices().unwrap()
+        .map(|d| d.name().unwrap_or_default())
+        .filter(|n| !n.to_lowercase().contains("cable") && !n.to_lowercase().contains("mapper"))
+        .collect();
+    available_device_names.dedup();
+
     let mut output_device = host.output_devices().unwrap().find(|d| {
         let name = d.name().unwrap_or_default().to_lowercase();
-        !name.contains("cable") && (name.contains("stereo") || name.contains("a2dp"))
+        !name.contains("cable") && (name.contains("stereo") || name.contains("a2dp") || name.contains("headphone"))
     });
 
     if output_device.is_none() {
         output_device = host.output_devices().unwrap().find(|d| {
             let name = d.name().unwrap_or_default().to_lowercase();
-            !name.contains("cable") && !name.contains("hands-free") && !name.contains("ag audio") && (name.contains("bluetooth") || name.contains("headphone"))
-        });
-    }
-
-    if output_device.is_none() {
-        output_device = host.output_devices().unwrap().find(|d| {
-            let name = d.name().unwrap_or_default().to_lowercase();
-            !name.contains("cable") && !name.contains("mapper") && !name.contains("hands-free")
+            !name.contains("cable") && !name.contains("mapper")
         });
     }
 
     let output_device = output_device.expect("Could not find a valid output speaker!");
+    let active_device_name = output_device.name().unwrap_or_else(|_| "Default Speaker".to_string());
 
     println!("Intercepting Audio From: {}", input_device.name().unwrap());
-    println!("Routing Processed Audio To: {}", output_device.name().unwrap());
+    println!("Routing Processed Audio To: {}", active_device_name);
 
     let out_supported_config = output_device.default_output_config().expect("Failed to get output config");
     let sample_rate = out_supported_config.sample_rate().0 as f32;
@@ -120,16 +145,18 @@ fn main() {
         .unwrap_or_else(|| input_device.default_input_config().unwrap());
     let in_config: cpal::StreamConfig = in_supported_config.clone().into();
 
-    println!("Input Sample Rate: {} Hz | Output Sample Rate: {} Hz", in_config.sample_rate.0, out_config.sample_rate.0);
-    if in_config.sample_rate.0 != out_config.sample_rate.0 {
-        println!("⚠️ WARNING: Sample rates mismatch! Please set both to matching rates in Windows Sound Properties.");
-    }
+    println!("Input Format: {:?} | Output Format: {:?}", in_supported_config.sample_format(), out_supported_config.sample_format());
 
     let dsp = Arc::new(Mutex::new(DspState {
         eq_filters: FREQUENCIES.map(|f| Biquad::new(f)),
         clarity_boost: Biquad::new(3800.0),
         clarity_mud_cut: Biquad::new(250.0),
+        bass_sub_boost: Biquad::new(35.0),
+        surround_width: 0.0,
+        ambience_level: 0.0,
+        dynamic_boost_ratio: 1.0,
         volume_boost_linear: 1.0,
+        current_energy: [0.0; 10],
     }));
     
     {
@@ -137,98 +164,167 @@ fn main() {
         for filter in state.eq_filters.iter_mut() { filter.calculate_coeffs(sample_rate); }
         state.clarity_boost.calculate_coeffs(sample_rate);
         state.clarity_mud_cut.calculate_coeffs(sample_rate);
+        state.bass_sub_boost.calculate_coeffs(sample_rate);
     }
 
-    // UPGRADE: Atomic Stereo Buffer (f32, f32) prevents channel inversion forever!
     let buffer_size = (sample_rate * 0.25) as usize; 
     let rb = HeapRb::<(f32, f32)>::new(buffer_size);
     let (mut producer, mut consumer) = rb.split();
 
-    // 4. Build Input Stream (Pushing atomic stereo tuples)
+    // UNIVERSAL INPUT STREAM (All tuple parentheses perfectly wrapped!)
     let input_stream = match in_supported_config.sample_format() {
-        cpal::SampleFormat::F32 => input_device.build_input_stream(
-            &in_config,
-            move |data: &[f32], _| { for chunk in data.chunks_exact(2) { let _ = producer.push((chunk[0], chunk[1])); } },
-            |err| eprintln!("Input error: {}", err), None
-        ),
-        cpal::SampleFormat::I16 => input_device.build_input_stream(
-            &in_config,
-            move |data: &[i16], _| { for chunk in data.chunks_exact(2) { let _ = producer.push((chunk[0] as f32 / i16::MAX as f32, chunk[1] as f32 / i16::MAX as f32)); } },
-            |err| eprintln!("Input error: {}", err), None
-        ),
-        cpal::SampleFormat::U16 => input_device.build_input_stream(
-            &in_config,
-            move |data: &[u16], _| { for chunk in data.chunks_exact(2) { let _ = producer.push(((chunk[0] as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0), (chunk[1] as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0))); } },
-            |err| eprintln!("Input error: {}", err), None
-        ),
-        _ => panic!("Unsupported input sample format"),
+        cpal::SampleFormat::F32 => input_device.build_input_stream(&in_config, move |data: &[f32], _| { for chunk in data.chunks_exact(2) { let _ = producer.push((chunk[0], chunk[1])); } }, |e| eprintln!("In err: {}", e), None),
+        cpal::SampleFormat::I16 => input_device.build_input_stream(&in_config, move |data: &[i16], _| { for chunk in data.chunks_exact(2) { let _ = producer.push((chunk[0] as f32 / i16::MAX as f32, chunk[1] as f32 / i16::MAX as f32)); } }, |e| eprintln!("In err: {}", e), None),
+        cpal::SampleFormat::U16 => input_device.build_input_stream(&in_config, move |data: &[u16], _| { for chunk in data.chunks_exact(2) { let _ = producer.push(((chunk[0] as f32 - 32768.0) / 32768.0, (chunk[1] as f32 - 32768.0) / 32768.0)); } }, |e| eprintln!("In err: {}", e), None),
+        cpal::SampleFormat::I32 => input_device.build_input_stream(&in_config, move |data: &[i32], _| { for chunk in data.chunks_exact(2) { let _ = producer.push((chunk[0] as f32 / i32::MAX as f32, chunk[1] as f32 / i32::MAX as f32)); } }, |e| eprintln!("In err: {}", e), None),
+        cpal::SampleFormat::F64 => input_device.build_input_stream(&in_config, move |data: &[f64], _| { for chunk in data.chunks_exact(2) { let _ = producer.push((chunk[0] as f32, chunk[1] as f32)); } }, |e| eprintln!("In err: {}", e), None),
+        cpal::SampleFormat::I8  => input_device.build_input_stream(&in_config, move |data: &[i8], _|  { for chunk in data.chunks_exact(2) { let _ = producer.push((chunk[0] as f32 / i8::MAX as f32, chunk[1] as f32 / i8::MAX as f32)); } }, |e| eprintln!("In err: {}", e), None),
+        cpal::SampleFormat::U8  => input_device.build_input_stream(&in_config, move |data: &[u8], _|  { for chunk in data.chunks_exact(2) { let _ = producer.push(((chunk[0] as f32 - 128.0) / 128.0, (chunk[1] as f32 - 128.0) / 128.0)); } }, |e| eprintln!("In err: {}", e), None),
+        cpal::SampleFormat::U32 => input_device.build_input_stream(&in_config, move |data: &[u32], _| { for chunk in data.chunks_exact(2) { let _ = producer.push(((chunk[0] as f64 - 2147483648.0) as f32 / 2147483648.0, (chunk[1] as f64 - 2147483648.0) as f32 / 2147483648.0)); } }, |e| eprintln!("In err: {}", e), None),
+        cpal::SampleFormat::I64 => input_device.build_input_stream(&in_config, move |data: &[i64], _| { for chunk in data.chunks_exact(2) { let _ = producer.push(((chunk[0] as f64 / i64::MAX as f64) as f32, (chunk[1] as f64 / i64::MAX as f64) as f32)); } }, |e| eprintln!("In err: {}", e), None),
+        cpal::SampleFormat::U64 => input_device.build_input_stream(&in_config, move |data: &[u64], _| { for chunk in data.chunks_exact(2) { let _ = producer.push((((chunk[0] as f64 - 9223372036854775808.0) / 9223372036854775808.0) as f32, ((chunk[1] as f64 - 9223372036854775808.0) / 9223372036854775808.0) as f32)); } }, |e| eprintln!("In err: {}", e), None),
+        _ => panic!("Unsupported input format: {:?}", in_supported_config.sample_format()),
     }.unwrap();
 
-    // 5. Build Output Stream (Processing atomic stereo tuples)
     let dsp_clone = Arc::clone(&dsp);
+    
+    // UNIVERSAL OUTPUT STREAM
     let output_stream = match out_supported_config.sample_format() {
-        cpal::SampleFormat::F32 => output_device.build_output_stream(
-            &out_config,
-            move |data: &mut [f32], _| {
-                let mut active_dsp = dsp_clone.try_lock(); 
-                for chunk in data.chunks_exact_mut(2) {
-                    let (mut left, mut right) = consumer.pop().unwrap_or((0.0, 0.0));
-                    if let Ok(ref mut state) = active_dsp {
-                        // -6dB Headroom safety net + gentle linear Volume Boost
-                        let gain = state.volume_boost_linear * 0.5;
-                        left *= gain; right *= gain;
-
-                        for filter in state.eq_filters.iter_mut() {
-                            left = filter.process(left, true); right = filter.process(right, false);
-                        }
-                        left = state.clarity_mud_cut.process(left, true); right = state.clarity_mud_cut.process(right, false);
-                        left = state.clarity_boost.process(left, true); right = state.clarity_boost.process(right, false);
+        cpal::SampleFormat::F32 => output_device.build_output_stream(&out_config, move |data: &mut [f32], _| {
+            let mut active_dsp = dsp_clone.try_lock(); 
+            for chunk in data.chunks_exact_mut(2) {
+                let (mut left, mut right) = consumer.pop().unwrap_or((0.0, 0.0));
+                if let Ok(ref mut state) = active_dsp {
+                    let gain = state.volume_boost_linear * 0.5;
+                    left *= gain; right *= gain;
+                    left = state.bass_sub_boost.process(left, true); right = state.bass_sub_boost.process(right, false);
+                    for i in 0..10 {
+                        left = state.eq_filters[i].process(left, true); right = state.eq_filters[i].process(right, false);
+                        state.current_energy[i] = (state.current_energy[i] * 0.92) + ((left.abs() + right.abs()) * 0.08);
                     }
-                    chunk[0] = f32::tanh(left); chunk[1] = f32::tanh(right);
+                    left = state.clarity_mud_cut.process(left, true); right = state.clarity_mud_cut.process(right, false);
+                    left = state.clarity_boost.process(left, true); right = state.clarity_boost.process(right, false);
+                    
+                    let mid = (left + right) * 0.5;
+                    let side = (left - right) * (0.5 + state.surround_width * 0.5) * (1.0 + state.ambience_level * 0.2);
+                    left = mid + side; right = mid - side;
+                    
+                    if (left.abs() + right.abs()) > 0.6 { left *= state.dynamic_boost_ratio; right *= state.dynamic_boost_ratio; }
                 }
-            }, |err| eprintln!("Output error: {}", err), None
-        ),
-        cpal::SampleFormat::I16 => output_device.build_output_stream(
-            &out_config,
-            move |data: &mut [i16], _| {
-                let mut active_dsp = dsp_clone.try_lock(); 
-                for chunk in data.chunks_exact_mut(2) {
-                    let (mut left, mut right) = consumer.pop().unwrap_or((0.0, 0.0));
-                    if let Ok(ref mut state) = active_dsp {
-                        let gain = state.volume_boost_linear * 0.5;
-                        left *= gain; right *= gain;
-
-                        for filter in state.eq_filters.iter_mut() {
-                            left = filter.process(left, true); right = filter.process(right, false);
-                        }
-                        left = state.clarity_mud_cut.process(left, true); right = state.clarity_mud_cut.process(right, false);
-                        left = state.clarity_boost.process(left, true); right = state.clarity_boost.process(right, false);
+                chunk[0] = f32::tanh(left); chunk[1] = f32::tanh(right);
+            }
+        }, |e| eprintln!("Out err: {}", e), None),
+        cpal::SampleFormat::I16 => output_device.build_output_stream(&out_config, move |data: &mut [i16], _| {
+            let mut active_dsp = dsp_clone.try_lock(); 
+            for chunk in data.chunks_exact_mut(2) {
+                let (mut left, mut right) = consumer.pop().unwrap_or((0.0, 0.0));
+                if let Ok(ref mut state) = active_dsp {
+                    let gain = state.volume_boost_linear * 0.5;
+                    left *= gain; right *= gain;
+                    left = state.bass_sub_boost.process(left, true); right = state.bass_sub_boost.process(right, false);
+                    for i in 0..10 {
+                        left = state.eq_filters[i].process(left, true); right = state.eq_filters[i].process(right, false);
+                        state.current_energy[i] = (state.current_energy[i] * 0.92) + ((left.abs() + right.abs()) * 0.08);
                     }
-                    chunk[0] = (f32::tanh(left) * i16::MAX as f32) as i16; chunk[1] = (f32::tanh(right) * i16::MAX as f32) as i16;
+                    left = state.clarity_mud_cut.process(left, true); right = state.clarity_mud_cut.process(right, false);
+                    left = state.clarity_boost.process(left, true); right = state.clarity_boost.process(right, false);
+                    let mid = (left + right) * 0.5;
+                    let side = (left - right) * (0.5 + state.surround_width * 0.5) * (1.0 + state.ambience_level * 0.2);
+                    left = mid + side; right = mid - side;
+                    if (left.abs() + right.abs()) > 0.6 { left *= state.dynamic_boost_ratio; right *= state.dynamic_boost_ratio; }
                 }
-            }, |err| eprintln!("Output error: {}", err), None
-        ),
-        cpal::SampleFormat::U16 => output_device.build_output_stream(
-            &out_config,
-            move |data: &mut [u16], _| {
-                let mut active_dsp = dsp_clone.try_lock(); 
-                for chunk in data.chunks_exact_mut(2) {
-                    let (mut left, mut right) = consumer.pop().unwrap_or((0.0, 0.0));
-                    if let Ok(ref mut state) = active_dsp {
-                        let gain = state.volume_boost_linear * 0.5;
-                        left *= gain; right *= gain;
-
-                        for filter in state.eq_filters.iter_mut() {
-                            left = filter.process(left, true); right = filter.process(right, false);
-                        }
-                        left = state.clarity_mud_cut.process(left, true); right = state.clarity_mud_cut.process(right, false);
-                        left = state.clarity_boost.process(left, true); right = state.clarity_boost.process(right, false);
+                chunk[0] = (f32::tanh(left) * i16::MAX as f32) as i16; chunk[1] = (f32::tanh(right) * i16::MAX as f32) as i16;
+            }
+        }, |e| eprintln!("Out err: {}", e), None),
+        cpal::SampleFormat::U16 => output_device.build_output_stream(&out_config, move |data: &mut [u16], _| {
+            let mut active_dsp = dsp_clone.try_lock(); 
+            for chunk in data.chunks_exact_mut(2) {
+                let (mut left, mut right) = consumer.pop().unwrap_or((0.0, 0.0));
+                if let Ok(ref mut state) = active_dsp {
+                    let gain = state.volume_boost_linear * 0.5;
+                    left *= gain; right *= gain;
+                    left = state.bass_sub_boost.process(left, true); right = state.bass_sub_boost.process(right, false);
+                    for i in 0..10 {
+                        left = state.eq_filters[i].process(left, true); right = state.eq_filters[i].process(right, false);
+                        state.current_energy[i] = (state.current_energy[i] * 0.92) + ((left.abs() + right.abs()) * 0.08);
                     }
-                    chunk[0] = ((f32::tanh(left) * 0.5 + 0.5) * u16::MAX as f32) as u16; chunk[1] = ((f32::tanh(right) * 0.5 + 0.5) * u16::MAX as f32) as u16;
+                    left = state.clarity_mud_cut.process(left, true); right = state.clarity_mud_cut.process(right, false);
+                    left = state.clarity_boost.process(left, true); right = state.clarity_boost.process(right, false);
+                    let mid = (left + right) * 0.5;
+                    let side = (left - right) * (0.5 + state.surround_width * 0.5) * (1.0 + state.ambience_level * 0.2);
+                    left = mid + side; right = mid - side;
+                    if (left.abs() + right.abs()) > 0.6 { left *= state.dynamic_boost_ratio; right *= state.dynamic_boost_ratio; }
                 }
-            }, |err| eprintln!("Output error: {}", err), None
-        ),
-        _ => panic!("Unsupported output sample format"),
+                chunk[0] = ((f32::tanh(left) * 0.5 + 0.5) * 65535.0) as u16; chunk[1] = ((f32::tanh(right) * 0.5 + 0.5) * 65535.0) as u16;
+            }
+        }, |e| eprintln!("Out err: {}", e), None),
+        cpal::SampleFormat::U8 => output_device.build_output_stream(&out_config, move |data: &mut [u8], _| {
+            let mut active_dsp = dsp_clone.try_lock(); 
+            for chunk in data.chunks_exact_mut(2) {
+                let (mut left, mut right) = consumer.pop().unwrap_or((0.0, 0.0));
+                if let Ok(ref mut state) = active_dsp {
+                    let gain = state.volume_boost_linear * 0.5;
+                    left *= gain; right *= gain;
+                    left = state.bass_sub_boost.process(left, true); right = state.bass_sub_boost.process(right, false);
+                    for i in 0..10 {
+                        left = state.eq_filters[i].process(left, true); right = state.eq_filters[i].process(right, false);
+                        state.current_energy[i] = (state.current_energy[i] * 0.92) + ((left.abs() + right.abs()) * 0.08);
+                    }
+                    left = state.clarity_mud_cut.process(left, true); right = state.clarity_mud_cut.process(right, false);
+                    left = state.clarity_boost.process(left, true); right = state.clarity_boost.process(right, false);
+                    let mid = (left + right) * 0.5;
+                    let side = (left - right) * (0.5 + state.surround_width * 0.5) * (1.0 + state.ambience_level * 0.2);
+                    left = mid + side; right = mid - side;
+                    if (left.abs() + right.abs()) > 0.6 { left *= state.dynamic_boost_ratio; right *= state.dynamic_boost_ratio; }
+                }
+                chunk[0] = ((f32::tanh(left) * 0.5 + 0.5) * 255.0) as u8; chunk[1] = ((f32::tanh(right) * 0.5 + 0.5) * 255.0) as u8;
+            }
+        }, |e| eprintln!("Out err: {}", e), None),
+        cpal::SampleFormat::I32 => output_device.build_output_stream(&out_config, move |data: &mut [i32], _| {
+            let mut active_dsp = dsp_clone.try_lock(); 
+            for chunk in data.chunks_exact_mut(2) {
+                let (mut left, mut right) = consumer.pop().unwrap_or((0.0, 0.0));
+                if let Ok(ref mut state) = active_dsp {
+                    let gain = state.volume_boost_linear * 0.5;
+                    left *= gain; right *= gain;
+                    left = state.bass_sub_boost.process(left, true); right = state.bass_sub_boost.process(right, false);
+                    for i in 0..10 {
+                        left = state.eq_filters[i].process(left, true); right = state.eq_filters[i].process(right, false);
+                        state.current_energy[i] = (state.current_energy[i] * 0.92) + ((left.abs() + right.abs()) * 0.08);
+                    }
+                    left = state.clarity_mud_cut.process(left, true); right = state.clarity_mud_cut.process(right, false);
+                    left = state.clarity_boost.process(left, true); right = state.clarity_boost.process(right, false);
+                    let mid = (left + right) * 0.5;
+                    let side = (left - right) * (0.5 + state.surround_width * 0.5) * (1.0 + state.ambience_level * 0.2);
+                    left = mid + side; right = mid - side;
+                    if (left.abs() + right.abs()) > 0.6 { left *= state.dynamic_boost_ratio; right *= state.dynamic_boost_ratio; }
+                }
+                chunk[0] = (f32::tanh(left) * i32::MAX as f32) as i32; chunk[1] = (f32::tanh(right) * i32::MAX as f32) as i32;
+            }
+        }, |e| eprintln!("Out err: {}", e), None),
+        cpal::SampleFormat::F64 => output_device.build_output_stream(&out_config, move |data: &mut [f64], _| {
+            let mut active_dsp = dsp_clone.try_lock(); 
+            for chunk in data.chunks_exact_mut(2) {
+                let (mut left, mut right) = consumer.pop().unwrap_or((0.0, 0.0));
+                if let Ok(ref mut state) = active_dsp {
+                    let gain = state.volume_boost_linear * 0.5;
+                    left *= gain; right *= gain;
+                    left = state.bass_sub_boost.process(left, true); right = state.bass_sub_boost.process(right, false);
+                    for i in 0..10 {
+                        left = state.eq_filters[i].process(left, true); right = state.eq_filters[i].process(right, false);
+                        state.current_energy[i] = (state.current_energy[i] * 0.92) + ((left.abs() + right.abs()) * 0.08);
+                    }
+                    left = state.clarity_mud_cut.process(left, true); right = state.clarity_mud_cut.process(right, false);
+                    left = state.clarity_boost.process(left, true); right = state.clarity_boost.process(right, false);
+                    let mid = (left + right) * 0.5;
+                    let side = (left - right) * (0.5 + state.surround_width * 0.5) * (1.0 + state.ambience_level * 0.2);
+                    left = mid + side; right = mid - side;
+                    if (left.abs() + right.abs()) > 0.6 { left *= state.dynamic_boost_ratio; right *= state.dynamic_boost_ratio; }
+                }
+                chunk[0] = f32::tanh(left) as f64; chunk[1] = f32::tanh(right) as f64;
+            }
+        }, |e| eprintln!("Out err: {}", e), None),
+        _ => panic!("Unsupported output format: {:?}", out_supported_config.sample_format()),
     }.unwrap();
 
     input_stream.play().unwrap();
@@ -242,33 +338,61 @@ fn main() {
         let mut websocket = accept(stream.unwrap()).unwrap();
         println!("Web UI Connected!");
         
-        loop {
-            let msg = match websocket.read() { Ok(msg) => msg, Err(_) => break };
-            if msg.is_text() {
-                let json = msg.to_text().unwrap();
-                if let Ok(update) = serde_json::from_str::<ControlMessage>(json) {
-                    let mut state = dsp.lock().unwrap();
-                    
-                    // Smooth, gentle 1x to 3x Volume Scaling (Prevents Square Wave Distortion!)
-                    if let Some(boost_val) = update.boost {
-                        state.volume_boost_linear = 1.0 + (boost_val * 0.2);
-                        println!("Volume Boost set to: {:.2}x", state.volume_boost_linear);
-                    }
-                    
-                    // Clarity: Gentle presence lift + mud reduction
-                    if let Some(clarity_val) = update.clarity {
-                        state.clarity_boost.gain_db = clarity_val * 0.6; 
-                        state.clarity_mud_cut.gain_db = -(clarity_val * 0.3);
-                        state.clarity_boost.calculate_coeffs(sample_rate);
-                        state.clarity_mud_cut.calculate_coeffs(sample_rate);
-                        println!("Clarity set to level: {}", clarity_val);
-                    }
+        let mut last_telemetry = Instant::now();
 
-                    if let (Some(band), Some(gain)) = (update.band, update.gain) {
-                        if band < 10 {
-                            state.eq_filters[band].gain_db = gain;
-                            state.eq_filters[band].calculate_coeffs(sample_rate);
-                            println!("Updated Band {} ({} Hz) to {} dB", band, state.eq_filters[band].freq, gain);
+        loop {
+            if last_telemetry.elapsed() >= Duration::from_millis(80) {
+                let state = dsp.lock().unwrap();
+                let mut ascii = String::new();
+                for &energy in state.current_energy.iter() {
+                    let dots = (energy * 18.0) as usize;
+                    ascii.push_str(&":".repeat(dots.min(4)));
+                    ascii.push_str(&".".repeat((4_usize).saturating_sub(dots)));
+                    ascii.push(' ');
+                }
+                
+                let telemetry = TelemetryMessage {
+                    msg_type: "telemetry".to_string(),
+                    active_device: active_device_name.clone(),
+                    available_devices: available_device_names.clone(),
+                    levels: state.current_energy.to_vec(),
+                    ascii_beat: ascii.trim().to_string(),
+                };
+                if let Ok(json) = serde_json::to_string(&telemetry) {
+                    let _ = websocket.send(tungstenite::Message::Text(json));
+                }
+                last_telemetry = Instant::now();
+            }
+
+            if let Ok(msg) = websocket.read() {
+                if msg.is_text() {
+                    let json = msg.to_text().unwrap();
+                    if let Ok(update) = serde_json::from_str::<ControlMessage>(json) {
+                        if let Some(device) = update.set_device {
+                            println!("⚠️ Device routing requested to: {}. Please set this device as default in Windows Sound Settings to switch instantly without rebooting!", device);
+                        }
+
+                        let mut state = dsp.lock().unwrap();
+                        if let Some(val) = update.boost { state.volume_boost_linear = 1.0 + (val * 0.25); }
+                        if let Some(val) = update.clarity {
+                            state.clarity_boost.gain_db = val * 0.7; 
+                            state.clarity_mud_cut.gain_db = -(val * 0.35);
+                            state.clarity_boost.calculate_coeffs(sample_rate);
+                            state.clarity_mud_cut.calculate_coeffs(sample_rate);
+                        }
+                        if let Some(val) = update.bass {
+                            state.bass_sub_boost.gain_db = val * 0.9;
+                            state.bass_sub_boost.calculate_coeffs(sample_rate);
+                        }
+                        if let Some(val) = update.surround { state.surround_width = val * 0.1; }
+                        if let Some(val) = update.ambience { state.ambience_level = val * 0.1; }
+                        if let Some(val) = update.dynamic { state.dynamic_boost_ratio = 1.0 + (val * 0.05); }
+
+                        if let (Some(band), Some(gain)) = (update.band, update.gain) {
+                            if band < 10 {
+                                state.eq_filters[band].gain_db = gain;
+                                state.eq_filters[band].calculate_coeffs(sample_rate);
+                            }
                         }
                     }
                 }

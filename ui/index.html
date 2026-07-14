@@ -3,90 +3,178 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>System Equalizer Engine - Pro V2</title>
+    <title>Pro Studio V5 - Ultimate EQ & DAW Engine</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body { background-color: #1a1a1a; color: #fff; }
+        body { background-color: #0a0a0a; color: #fff; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
         
-        /* Custom Vertical Sliders for EQ */
         input[type=range].eq-slider {
             writing-mode: vertical-lr;
             direction: rtl;
             appearance: slider-vertical;
-            width: 8px;
-            height: 180px;
-            vertical-align: bottom;
-            accent-color: #e11d48;
+            width: 6px;
+            height: 150px;
+            accent-color: #f43f5e;
             cursor: pointer;
         }
 
-        /* Custom Horizontal Sliders for Boost & Clarity */
         input[type=range].fx-slider {
             width: 100%;
             height: 6px;
             accent-color: #f43f5e;
             cursor: pointer;
         }
-        
-        .slider-container {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 0.75rem;
+
+        /* SVG Rotary Knob Styling */
+        .knob-svg {
+            width: 42px;
+            height: 42px;
+            cursor: pointer;
+            filter: drop-shadow(0 4px 6px rgba(0,0,0,0.6));
+            transition: transform 0.1s ease-out;
         }
+        .knob-svg:hover circle.knob-ring { stroke: #f43f5e; }
     </style>
 </head>
-<body class="min-h-screen flex flex-col items-center justify-center font-sans p-6">
+<body class="min-h-screen flex flex-col items-center justify-center p-6">
 
-    <div class="bg-[#121212] p-8 rounded-xl shadow-2xl border border-gray-800 w-full max-w-4xl">
+    <div class="bg-[#121212] p-6 rounded-2xl shadow-2xl border border-gray-800 w-full max-w-5xl">
         
-        <div class="flex justify-between items-center mb-6">
-            <h1 class="text-2xl font-bold tracking-wider flex items-center gap-3">
-                <span class="text-rose-600">ılı.</span> PRO EQ & FX ENGINE
-            </h1>
-            <div id="status" class="px-3 py-1 rounded-full text-xs font-semibold bg-red-900/30 text-red-500 border border-red-800">
-                Disconnected
+        <div class="flex flex-wrap justify-between items-center pb-4 mb-6 border-b border-gray-800 gap-4">
+            <div class="flex items-center gap-3">
+                <span class="text-3xl font-extrabold tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-rose-500 to-amber-500">
+                    ılı. PRO STUDIO V5
+                </span>
+                <span id="status" class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-red-900/40 text-red-400 border border-red-800 uppercase">Offline</span>
+            </div>
+            
+            <div class="flex items-center gap-3 bg-[#1a1a1a] px-4 py-2 rounded-xl border border-gray-700">
+                <span class="text-xs text-gray-400 font-semibold">🎧 OUTPUT DEVICE:</span>
+                <select id="device-select" onchange="switchDevice(this.value)" class="bg-[#0d0d0d] text-xs font-mono text-emerald-400 font-bold px-3 py-1 rounded border border-gray-700 focus:outline-none focus:border-emerald-500">
+                    <option value="">Scanning Hardware...</option>
+                </select>
             </div>
         </div>
 
-        <div class="grid grid-cols-2 gap-6 bg-[#181818] p-6 rounded-lg border border-gray-800 mb-8">
+        <div class="bg-[#080808] p-4 rounded-xl border border-gray-800 mb-6 flex flex-col items-center">
+            <div class="flex justify-between w-full text-[11px] font-mono text-gray-500 mb-2">
+                <span>BEAT TELEMETRY</span>
+                <span id="beat-ascii" class="text-rose-500 font-bold tracking-widest text-sm">:::....:::::..::::.::::</span>
+                <span>REAL-TIME RMS</span>
+            </div>
+            <div id="visualizer-bars" class="flex justify-between items-end w-full h-8 gap-2"></div>
+        </div>
+
+        <div class="bg-[#181818] p-4 rounded-xl border border-gray-800 mb-6 flex flex-wrap justify-between items-center gap-4">
+            <div class="flex items-center gap-3">
+                <label class="text-xs font-bold text-gray-300">PRESETS:</label>
+                <select id="preset-select" onchange="loadPreset(this.value)" class="bg-[#0f0f0f] text-xs font-semibold px-3 py-1.5 rounded-lg border border-gray-700 text-rose-400 focus:outline-none">
+                    <option value="flat">Flat (Default)</option>
+                    <option value="bass_boost">Deep Bass Sub</option>
+                    <option value="vocal">Vocal Studio</option>
+                    <option value="electronic">Electronic EDM</option>
+                    <option value="acoustic">Acoustic Warmth</option>
+                    <option value="movie">Movie Theater 3D</option>
+                </select>
+                <button onclick="toggleFavorite()" id="fav-btn" class="px-3 py-1 rounded-lg text-xs font-bold bg-gray-800 text-gray-300 border border-gray-700 transition-colors">
+                    ☆ Mark Favorite
+                </button>
+            </div>
+            <div class="flex items-center gap-2">
+                <input type="text" id="custom-name" placeholder="Preset Name..." class="bg-[#0f0f0f] text-xs px-3 py-1.5 rounded-lg border border-gray-700 text-white focus:outline-none w-32">
+                <button onclick="saveCustomPreset()" class="bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold px-4 py-1.5 rounded-lg transition-colors shadow-lg shadow-rose-900/30">
+                    + Save Preset
+                </button>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-5 gap-4 bg-[#181818] p-5 rounded-xl border border-gray-800 mb-6">
             <div>
-                <div class="flex justify-between text-sm mb-2 font-mono">
-                    <span class="text-gray-300 font-semibold flex items-center gap-2">🔊 Volume Boost</span>
-                    <span id="boost-val" class="text-rose-500 font-bold">0</span>
-                </div>
+                <div class="flex justify-between text-xs mb-1 font-mono"><span class="text-gray-300 font-bold">🔊 Vol Boost</span><span id="boost-val" class="text-rose-500 font-bold">0</span></div>
                 <input type="range" min="0" max="10" step="0.5" value="0" class="fx-slider" oninput="updateFx('boost', this.value)">
-                <p class="text-[11px] text-gray-500 mt-1">Master decibel gain amplification</p>
+                <p class="text-[10px] text-gray-500 mt-1">Master decibel gain</p>
             </div>
-
             <div>
-                <div class="flex justify-between text-sm mb-2 font-mono">
-                    <span class="text-gray-300 font-semibold flex items-center gap-2">✨ Clarity</span>
-                    <span id="clarity-val" class="text-rose-500 font-bold">0</span>
-                </div>
+                <div class="flex justify-between text-xs mb-1 font-mono"><span class="text-gray-300 font-bold">✨ Clarity</span><span id="clarity-val" class="text-rose-500 font-bold">0</span></div>
                 <input type="range" min="0" max="10" step="0.5" value="0" class="fx-slider" oninput="updateFx('clarity', this.value)">
-                <p class="text-[11px] text-gray-500 mt-1">Crisp vocal presence & bass mud removal</p>
+                <p class="text-[10px] text-gray-500 mt-1">Treble air & presence</p>
+            </div>
+            <div>
+                <div class="flex justify-between text-xs mb-1 font-mono"><span class="text-gray-300 font-bold">🌊 Ambience</span><span id="ambience-val" class="text-rose-500 font-bold">0</span></div>
+                <input type="range" min="0" max="10" step="0.5" value="0" class="fx-slider" oninput="updateFx('ambience', this.value)">
+                <p class="text-[10px] text-gray-500 mt-1">Stereo reverb space</p>
+            </div>
+            <div>
+                <div class="flex justify-between text-xs mb-1 font-mono"><span class="text-gray-300 font-bold">🛰️ Surround</span><span id="surround-val" class="text-rose-500 font-bold">0</span></div>
+                <input type="range" min="0" max="10" step="0.5" value="0" class="fx-slider" oninput="updateFx('surround', this.value)">
+                <p class="text-[10px] text-gray-500 mt-1">3D stereo cross-feed</p>
+            </div>
+            <div>
+                <div class="flex justify-between text-xs mb-1 font-mono"><span class="text-gray-300 font-bold">💥 Bass Boost</span><span id="bass-val" class="text-rose-500 font-bold">0</span></div>
+                <input type="range" min="0" max="10" step="0.5" value="0" class="fx-slider" oninput="updateFx('bass', this.value)">
+                <p class="text-[10px] text-gray-500 mt-1">35Hz sub-harmonic</p>
             </div>
         </div>
 
-        <div class="flex justify-between px-4 bg-[#0a0a0a] rounded-lg p-6 border border-gray-800">
+        <div class="flex justify-between px-4 bg-[#080808] rounded-xl p-6 border border-gray-800">
             <script>
                 const frequencies = [22, 44, 240, 397, 735, 1360, 2520, 4670, 9100, 16000];
                 let ws;
+                let favorites = JSON.parse(localStorage.getItem('eq_favorites') || '[]');
+                let populatedDevices = false;
+
+                window.addEventListener('DOMContentLoaded', () => {
+                    const vizContainer = document.getElementById('visualizer-bars');
+                    frequencies.forEach((_, i) => {
+                        vizContainer.innerHTML += `<div id="led-${i}" class="flex-1 bg-gray-800 h-1 rounded-t transition-all duration-75"></div>`;
+                    });
+                    renderFavorites();
+                });
                 
                 try {
                     ws = new WebSocket("ws://127.0.0.1:3030");
                     ws.onopen = () => {
-                        document.getElementById('status').innerText = "Connected to Engine";
-                        document.getElementById('status').className = "px-3 py-1 rounded-full text-xs font-semibold bg-green-900/30 text-green-500 border border-green-800";
+                        document.getElementById('status').innerText = "ONLINE";
+                        document.getElementById('status').className = "px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-900/40 text-emerald-400 border border-emerald-800 uppercase";
+                    };
+                    ws.onmessage = (event) => {
+                        const data = JSON.parse(event.data);
+                        if (data.msg_type === "telemetry") {
+                            document.getElementById('beat-ascii').innerText = data.ascii_beat;
+                            
+                            if (!populatedDevices && data.available_devices.length > 0) {
+                                const select = document.getElementById('device-select');
+                                select.innerHTML = '';
+                                data.available_devices.forEach(dev => {
+                                    const selected = dev === data.active_device ? 'selected' : '';
+                                    select.innerHTML += `<option value="${dev}" ${selected}>${dev}</option>`;
+                                });
+                                populatedDevices = true;
+                            }
+
+                            data.levels.forEach((val, idx) => {
+                                const led = document.getElementById(`led-${idx}`);
+                                if (led) {
+                                    const heightPercent = Math.min(val * 350, 100);
+                                    led.style.height = `${Math.max(heightPercent, 4)}%`;
+                                    led.className = `flex-1 rounded-t transition-all duration-75 ${heightPercent > 80 ? 'bg-rose-500 shadow-lg shadow-rose-500/50' : heightPercent > 40 ? 'bg-amber-500' : 'bg-emerald-500'}`;
+                                }
+                            });
+                        }
                     };
                     ws.onclose = () => {
-                        document.getElementById('status').innerText = "Engine Offline";
-                        document.getElementById('status').className = "px-3 py-1 rounded-full text-xs font-semibold bg-red-900/30 text-red-500 border border-red-800";
+                        document.getElementById('status').innerText = "OFFLINE";
+                        document.getElementById('status').className = "px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-red-900/40 text-red-400 border border-red-800 uppercase";
                     };
                 } catch (e) { console.warn("Offline preview"); }
 
-                // Send Volume Boost or Clarity to Rust
+                function switchDevice(deviceName) {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ set_device: deviceName }));
+                        alert(`Routing requested to: ${deviceName}. Check your Windows Default Output if audio does not switch instantly!`);
+                    }
+                }
+
                 function updateFx(type, value) {
                     document.getElementById(`${type}-val`).innerText = value;
                     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -96,7 +184,6 @@
                     }
                 }
 
-                // Send 10-Band EQ updates to Rust
                 function updateGain(bandIndex, gainValue) {
                     document.getElementById(`label-${bandIndex}`).innerText = gainValue > 0 ? `+${gainValue}` : gainValue;
                     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -104,27 +191,109 @@
                     }
                 }
 
-                // Generate the 10 EQ bands dynamically
+                function rotateKnob(index, delta) {
+                    const slider = document.getElementById(`slider-${index}`);
+                    let val = parseInt(slider.value) + delta;
+                    val = Math.max(-12, Math.min(12, val));
+                    slider.value = val;
+                    updateGain(index, val);
+                    
+                    const deg = (val / 12) * 135;
+                    document.getElementById(`knob-group-${index}`).style.transform = `rotate(${deg}deg)`;
+                }
+
+                const presets = {
+                    flat: [0,0,0,0,0,0,0,0,0,0],
+                    bass_boost: [10,8,4,1,0,0,0,0,0,0],
+                    vocal: [-2,-1,0,3,6,6,4,2,0,0],
+                    electronic: [8,6,2,0,-2,2,4,6,8,8],
+                    acoustic: [3,2,1,0,2,3,4,3,2,1],
+                    movie: [6,4,0,0,2,4,6,8,6,4]
+                };
+
+                function loadPreset(name) {
+                    const gains = presets[name] || JSON.parse(localStorage.getItem(`custom_eq_${name}`)) || presets.flat;
+                    gains.forEach((gain, i) => {
+                        const slider = document.getElementById(`slider-${i}`);
+                        if (slider) {
+                            slider.value = gain;
+                            updateGain(i, gain);
+                            const deg = (gain / 12) * 135;
+                            document.getElementById(`knob-group-${i}`).style.transform = `rotate(${deg}deg)`;
+                        }
+                    });
+                    checkFavoriteStatus(name);
+                }
+
+                function saveCustomPreset() {
+                    const name = document.getElementById('custom-name').value.trim();
+                    if (!name) return alert("Please enter a preset name!");
+                    let currentGains = [];
+                    for(let i=0; i<10; i++) currentGains.push(parseInt(document.getElementById(`slider-${i}`).value));
+                    
+                    localStorage.setItem(`custom_eq_${name}`, JSON.stringify(currentGains));
+                    const select = document.getElementById('preset-select');
+                    select.innerHTML += `<option value="${name}">${name} (Custom)</option>`;
+                    select.value = name;
+                    document.getElementById('custom-name').value = '';
+                    alert(`Saved custom preset: ${name}`);
+                }
+
+                function toggleFavorite() {
+                    const current = document.getElementById('preset-select').value;
+                    const index = favorites.indexOf(current);
+                    if (index > -1) favorites.splice(index, 1);
+                    else favorites.push(current);
+                    
+                    localStorage.setItem('eq_favorites', JSON.stringify(favorites));
+                    checkFavoriteStatus(current);
+                }
+
+                function checkFavoriteStatus(name) {
+                    const btn = document.getElementById('fav-btn');
+                    if (favorites.includes(name)) {
+                        btn.innerHTML = "★ Favorite";
+                        btn.className = "px-3 py-1 rounded-lg text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500 transition-colors";
+                    } else {
+                        btn.innerHTML = "☆ Mark Favorite";
+                        btn.className = "px-3 py-1 rounded-lg text-xs font-bold bg-gray-800 text-gray-300 border border-gray-700 transition-colors";
+                    }
+                }
+
+                function renderFavorites() {
+                    checkFavoriteStatus(document.getElementById('preset-select').value);
+                }
+
                 frequencies.forEach((freq, index) => {
-                    let freqLabel = freq >= 1000 ? (freq/1000).toFixed(2) + ' kHz' : freq + ' Hz';
+                    let freqLabel = freq >= 1000 ? (freq/1000).toFixed(1) + 'k' : freq;
                     document.write(`
-                        <div class="slider-container group">
-                            <span id="label-${index}" class="text-xs text-gray-400 font-mono group-hover:text-rose-500 transition-colors">0</span>
+                        <div class="flex flex-col items-center gap-3 group">
+                            <span id="label-${index}" class="text-xs text-gray-400 font-mono font-bold group-hover:text-rose-500 transition-colors">0</span>
                             <input 
+                                id="slider-${index}"
                                 type="range" 
                                 min="-12" max="12" step="1" value="0"
                                 class="eq-slider"
-                                oninput="updateGain(${index}, this.value)"
+                                oninput="updateGain(${index}, this.value); document.getElementById('knob-group-${index}').style.transform = 'rotate(' + (this.value/12)*135 + 'deg)';"
                             >
-                            <span class="text-[10px] text-gray-500 font-mono">${freqLabel}</span>
+                            
+                            <svg class="knob-svg mt-1" viewBox="0 0 100 100" onclick="rotateKnob(${index}, 1)" oncontextmenu="event.preventDefault(); rotateKnob(${index}, -1);" title="Left-click: +1dB | Right-click: -1dB">
+                                <circle cx="50" cy="50" r="42" fill="#181818" stroke="#2a2a2a" stroke-width="6" class="knob-ring transition-colors"/>
+                                <g id="knob-group-${index}" style="transform-origin: 50px 50px; transition: transform 0.15s ease-out;">
+                                    <line x1="50" y1="50" x2="50" y2="16" stroke="#f43f5e" stroke-width="6" stroke-linecap="round"/>
+                                    <circle cx="50" cy="50" r="8" fill="#f43f5e"/>
+                                </g>
+                            </svg>
+
+                            <span class="text-[11px] text-gray-500 font-mono font-bold">${freqLabel}</span>
                         </div>
                     `);
                 });
             </script>
         </div>
 
-        <div class="mt-6 text-center text-xs text-gray-500 font-mono">
-            💡 TIP: Use <strong>Volume Boost</strong> for loudness, and keep your EQ sliders shaped gracefully without maxing them all out!
+        <div class="mt-4 text-center text-[11px] text-gray-500 font-mono">
+            💡 TIP: Use the top <strong>Output Device</strong> dropdown to switch speakers, and <strong>Left/Right Click</strong> any circular knob for studio precision!
         </div>
     </div>
 
